@@ -8,14 +8,23 @@
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject var bluetoothManager = BluetoothManager()
+
     var body: some View {
         VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+            Text(bluetoothManager.deviceName)
+                .font(.title)
+                .padding()
+
+            Text("Heart Rate: \(bluetoothManager.heartRate) bpm")
+                .font(.largeTitle)
+                .padding()
+                .foregroundColor(.red)
+                .bold()
         }
-        .padding()
+        .onAppear {
+            // Any setup when the view appears
+        }
     }
 }
 
