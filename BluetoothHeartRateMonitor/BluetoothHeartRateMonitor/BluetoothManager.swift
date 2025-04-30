@@ -9,105 +9,94 @@ import Foundation
 import CoreBluetooth
 
 class BluetoothManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
-    var centralManager: CBCentralManager!
-    var heartRateMonitor: CBPeripheral?
-
-    @Published var deviceName: String = "Searching for Heart Monitor..."
-    @Published var heartRate: Int = 0 // Heart rate value to display
-
-    let heartRateServiceUUID = CBUUID(string: "180D")
-    let heartRateMeasurementCharacteristicUUID = CBUUID(string: "2A37") // Heart Rate Measurement Characteristic
+    private var centralManager: CBCentralManager!
+    private var heartRatePeripheral: CBPeripheral?
+    
+    @Published var latestHeartRate: Int? = nil
+    
+    // Heart Rate Service UUID (standardized by Bluetooth SIG)
+    private let heartRateServiceCBUUID = CBUUID(string: "180D")
+    private let heartRateMeasurementCBUUID = CBUUID(string: "2A37")
 
     override init() {
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: nil)
     }
 
+    // Called when Bluetooth state changes
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        if central.state == .poweredOn {
-            print("Bluetooth is On. Scanning...")
-            centralManager.scanForPeripherals(withServices: [heartRateServiceUUID], options: nil)
-        } else {
-            print("Bluetooth not available")
-            deviceName = "Bluetooth not available"
+        switch central.state {
+        case .poweredOn:
+            print("Bluetooth is ON. Scanning for heart rate monitors...")
+            centralManager.scanForPeripherals(withServices: [heartRateServiceCBUUID], options: nil)
+        default:
+            print("Bluetooth is not available: \(central.state.rawValue)")
         }
     }
 
-    func centralManager(_ central: CBCentralManager,
-                        didDiscover peripheral: CBPeripheral,
-                        advertisementData: [String : Any],
-                        rssi RSSI: NSNumber) {
-        print("Discovered: \(peripheral.name ?? "Unknown Device")")
-        heartRateMonitor = peripheral
-        heartRateMonitor?.delegate = self
+    // Found a peripheral
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
+                        advertisementData: [String : Any], rssi RSSI: NSNumber) {
+        print("Discovered \(peripheral.name ?? "Unknown Device")")
+
+        // Stop scanning and connect
+        self.heartRatePeripheral = peripheral
+        self.heartRatePeripheral?.delegate = self
         centralManager.stopScan()
         centralManager.connect(peripheral, options: nil)
     }
 
-    func centralManager(_ central: CBCentralManager,
-                        didConnect peripheral: CBPeripheral) {
-        print("Connected to: \(peripheral.name ?? "Unknown")")
-        deviceName = "Connected to: \(peripheral.name ?? "Unknown")"
-
-        // Discover services
-        heartRateMonitor?.discoverServices([heartRateServiceUUID])
+    // Connected to peripheral
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        print("Connected to \(peripheral.name ?? "device"). Discovering services...")
+        peripheral.discoverServices([heartRateServiceCBUUID])
     }
 
-    func centralManager(_ central: CBCentralManager,
-                        didFailToConnect peripheral: CBPeripheral,
-                        error: Error?) {
-        print("Failed to connect")
-        deviceName = "Failed to connect"
-    }
-
-    // Discover characteristics after services are discovered
-    func peripheral(_ peripheral: CBPeripheral,
-                    didDiscoverServices error: Error?) {
-        if let services = peripheral.services {
-            for service in services {
-                if service.uuid == heartRateServiceUUID {
-                    peripheral.discoverCharacteristics([heartRateMeasurementCharacteristicUUID], for: service)
-                }
+    // Discovered services
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard let services = peripheral.services else { return }
+        for service in services {
+            print("Discovered service: \(service.uuid)")
+            if service.uuid == heartRateServiceCBUUID {
+                peripheral.discoverCharacteristics([heartRateMeasurementCBUUID], for: service)
             }
         }
     }
 
-    // Handle characteristics (heart rate data)
-    func peripheral(_ peripheral: CBPeripheral,
-                    didDiscoverCharacteristicsFor service: CBService,
+    // Discovered characteristics
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,
                     error: Error?) {
-        if service.uuid == heartRateServiceUUID {
-            for characteristic in service.characteristics ?? [] {
-                if characteristic.uuid == heartRateMeasurementCharacteristicUUID {
-                    peripheral.setNotifyValue(true, for: characteristic) // Start notifications
-                }
+        guard let characteristics = service.characteristics else { return }
+        for characteristic in characteristics {
+            if characteristic.uuid == heartRateMeasurementCBUUID {
+                print("Found heart rate measurement characteristic. Subscribing...")
+                peripheral.setNotifyValue(true, for: characteristic)
             }
         }
     }
 
-    // Receive heart rate data from the monitor
-    func peripheral(_ peripheral: CBPeripheral,
-                    didUpdateValueFor characteristic: CBCharacteristic,
+    // Received heart rate update
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
-        if characteristic.uuid == heartRateMeasurementCharacteristicUUID {
-            // Parse the heart rate data
-            if let heartRateData = characteristic.value {
-                let heartRateValue = parseHeartRateData(data: heartRateData)
-                DispatchQueue.main.async {
-                    self.heartRate = heartRateValue // Update heart rate on the main thread
-                }
+        if characteristic.uuid == heartRateMeasurementCBUUID,
+           let data = characteristic.value {
+            let bpm = parseHeartRate(from: data)
+            DispatchQueue.main.async {
+                self.latestHeartRate = bpm
             }
+            print("Heart Rate: \(bpm) BPM")
         }
     }
 
-    // Parse the heart rate data (assuming it's in the standard format for HRM)
-    func parseHeartRateData(data: Data) -> Int {
-        var heartRate = 0
-
-        // The heart rate data format is usually 1 byte for flags, and 1 byte for the heart rate
-        if data.count > 1 {
-            heartRate = Int(data[1]) // The heart rate is in the second byte
+    // Parse heart rate from raw BLE data
+    private func parseHeartRate(from data: Data) -> Int {
+        let byteArray = [UInt8](data)
+        let flag = byteArray[0]
+        let isHeartRateInUInt16 = (flag & 0x01) == 1
+        if isHeartRateInUInt16 {
+            return Int(UInt16(byteArray[1]) | UInt16(byteArray[2]) << 8)
+        } else {
+            return Int(byteArray[1])
         }
-        return heartRate
     }
 }
